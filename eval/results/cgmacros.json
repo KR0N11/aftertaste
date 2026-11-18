@@ -1,0 +1,26 @@
+{
+  "dataset": "CGMacros v1.0.0 (PhysioNet), adults without type 1 diabetes, no insulin",
+  "participants": 35,
+  "n_train": 630,
+  "n_test": 210,
+  "mae_mgdl": {
+    "shared_carbs_only": 30.5,
+    "personal_carbs_only": 26.7,
+    "shared_model": 30.9,
+    "personalized_model": 26.1
+  },
+  "personalized_vs_shared_carbs_only": {
+    "improvement_pct": 14.6,
+    "ci95_pct": [
+      4.7,
+      24.2
+    ]
+  },
+  "personalized_vs_personal_carbs_only": {
+    "improvement_pct": 2.3,
+    "ci95_pct": [
+      -7.9,
+      11.8
+    ]
+  }
+}

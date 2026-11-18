@@ -47,10 +47,9 @@ class ResponseModel:
     """Ridge regression on all features. Linear on purpose: with a few hundred
     meals, a model you can read the coefficients of beats one you cannot."""
 
-    names = FEATURE_NAMES
-
-    def __init__(self, alpha: float = 3.0) -> None:
+    def __init__(self, alpha: float = 3.0, names: Sequence[str] = FEATURE_NAMES) -> None:
         self.alpha = alpha
+        self.names = tuple(names)
 
     def fit(self, rows: Sequence[Row]) -> "ResponseModel":
         self._m = make_pipeline(StandardScaler(), Ridge(alpha=self.alpha))

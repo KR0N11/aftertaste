@@ -47,11 +47,43 @@ Dexcom API v3 / Clarity CSV ──► glucose readings + insulin doses ───
 | Dexcom API v3 OAuth + sync, Clarity CSV import (mg/dL and mmol/L) | built, tested with mocked HTTP and a fixture export |
 | Response maths, IOB, features, chronological eval | built, tested on known traces |
 | HTTP API + CLI | built, tested; server run end to end on demo data |
-| Carb estimation eval on a public labelled dataset | harness built; results pending |
+| Glucose-rise prediction on public data (CGMacros) | **measured**, see Results |
+| Carb estimation from photos (1,084 labelled CGMacros photos) | harness and labels ready; needs an API key to run |
 | My own data | not collected yet |
 
-Results are added here only when measured. The simulator numbers below are
-not results.
+Results are added here only when measured. The simulator numbers further down
+are not results.
+
+## Results
+
+### Glucose-rise prediction on public data
+
+[CGMacros](https://doi.org/10.13026/3z8q-x658) (PhysioNet, CC BY-NC-SA 4.0):
+adults wearing a Dexcom G6 with labelled meals. **Nobody in it has type 1
+diabetes or takes insulin**, so this tests the method, not type 1.
+
+Only fully eaten meals (`Amount Consumed` = 100) with a clean trace and no
+other meal within 2 h are used: 840 of 1,706 meal rows, 35 people. Each
+person's later 25% of meals are held out; nothing from them is used in
+training. Reproduce with `aftertaste cgmacros-eval <folder>`
+([eval/results/cgmacros.json](eval/results/cgmacros.json)).
+
+| Predictor, 210 held-out meals | Peak-rise error (MAE) |
+|---|---|
+| Shared carbs-only (carb counting) | 30.5 mg/dL |
+| Shared model (carbs, fat, protein, fibre, timing) | 30.9 mg/dL |
+| Personal carbs-only (one line per person) | 26.7 mg/dL |
+| **Personalized model** | **26.1 mg/dL** |
+
+- Personalized model vs carb counting: **14.6% lower error** (95% bootstrap CI 4.7% to 24.2%).
+- Personalized model vs personal carbs-only: 2.3% lower (CI -7.9% to 11.8%), **not
+  a real difference**.
+
+What this says: the gain comes from learning the person (their typical rise
+per gram, from earlier meals only, leave-one-out, plus A1c). Adding fat,
+protein and fibre on top barely helps here. A model shared across people
+did not beat carb counting at all, which was the first thing tried; the
+personal features were added after that, and both results are reported.
 
 ### Pipeline check on synthetic data (not a result)
 

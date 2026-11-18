@@ -47,6 +47,14 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("csv")
     c.add_argument("--out", default="eval/results")
 
+    c = sub.add_parser("cgmacros-eval", help="glucose-rise prediction on the public CGMacros dataset")
+    c.add_argument("root", help="folder containing CGMacros-0XX folders and bio.csv")
+    c.add_argument("--out", default="eval/results")
+
+    c = sub.add_parser("cgmacros-labels", help="write a photo-only carb eval CSV from CGMacros")
+    c.add_argument("root")
+    c.add_argument("--out", default="data/cgmacros/labels.csv")
+
     c = sub.add_parser("demo", help="fill a database with SYNTHETIC data and evaluate")
     c.add_argument("--days", type=int, default=60)
 
@@ -69,6 +77,23 @@ def main(argv: list[str] | None = None) -> int:
             store.add_meal(m)
         print(f"SYNTHETIC data written to {db}. These numbers describe the simulator, not a person.")
         _print(service.insights(store))
+        return 0
+
+    if args.cmd == "cgmacros-eval":
+        from pathlib import Path
+
+        from .cgmacros import evaluate_personalized
+
+        result = evaluate_personalized(args.root)
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "cgmacros.json").write_text(json.dumps(result, indent=2) + "\n")
+        _print(result)
+        return 0
+    if args.cmd == "cgmacros-labels":
+        from .cgmacros import write_carb_labels
+
+        print(f"{write_carb_labels(args.root, args.out)} photo-labelled meals written to {args.out}")
         return 0
 
     store = Store(args.db)
