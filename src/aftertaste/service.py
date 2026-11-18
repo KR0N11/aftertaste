@@ -9,7 +9,7 @@ from .dexcom import DexcomClient
 from .features import build_dataset, build_row
 from .glucose import measure_response
 from .models import Meal, utc
-from .nutrition import MealParser
+from .nutrition import MealParser, ParseError
 from .predict import EvalResult, ResponseModel, evaluate
 from .store import Store
 
@@ -117,3 +117,98 @@ def sync_dexcom(store: Store, client: DexcomClient, days: int = 30) -> dict:
     store.add_doses(doses)
     store.set_meta("last_sync", end.isoformat())
     return {"readings": len(readings), "insulin_doses": len(doses), "from": start.isoformat()}
+
+
+def import_photos(store: Store, parser: MealParser, folder: str | Path, tz: str = "America/Toronto") -> dict:
+    """Log every new photo in `folder` as a meal at the time it was taken.
+    A photo the model cannot read stays un-imported and is retried next run."""
+    from .photos import find_new, to_model_jpeg
+
+    imported, failed = [], []
+    for photo in find_new(folder, store.imported_hashes("photo"), tz):
+        jpeg = to_model_jpeg(photo, Path("data/photos"))
+        try:
+            meal = log_meal(store, parser, photo.taken_at, photo=jpeg)
+        except ParseError as e:
+            failed.append({"file": photo.source.name, "error": str(e)})
+            continue
+        store.mark_imported(photo.sha256, "photo", meal.id)
+        imported.append(
+            {"file": photo.source.name, "eaten_at": meal.eaten_at.isoformat(),
+             "time_from": photo.time_source, "carbs_g": meal.nutrition.carbs_g,
+             "confidence": meal.nutrition.confidence}
+        )
+    return {"imported": imported, "failed": failed}
+
+
+def find_clarity_exports(folder: str | Path) -> list[Path]:
+    """CSV files in `folder` whose header looks like a Clarity export."""
+    found = []
+    for path in sorted(Path(folder).glob("*.csv"), key=lambda p: p.stat().st_mtime):
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                header = f.readline()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if "Event Type" in header and "Glucose Value" in header:
+            found.append(path)
+    return found
+
+
+def import_new_clarity(store: Store, folder: str | Path, tz: str = "America/Toronto") -> dict:
+    from .clarity import import_clarity_csv
+    from .photos import sha256_of
+
+    done = store.imported_hashes("clarity")
+    counts = {"files": 0, "readings": 0, "insulin_doses": 0}
+    for path in find_clarity_exports(folder):
+        digest = sha256_of(path)
+        if digest in done:
+            continue
+        readings, doses = import_clarity_csv(path, tz=tz)
+        store.add_readings(readings)
+        store.add_doses(doses)
+        store.mark_imported(digest, "clarity")
+        counts["files"] += 1
+        counts["readings"] += len(readings)
+        counts["insulin_doses"] += len(doses)
+    return counts
+
+
+NO_ACCESS = (
+    "no permission to read {folder}. macOS blocks background jobs from Downloads and "
+    "iCloud Drive: System Settings > Privacy & Security > Full Disk Access > add "
+    "~/.local/bin/uv (the program the scheduled job runs)."
+)
+
+
+def _readable(folder: Path) -> str | None:
+    """None if the folder can be listed, else the reason. Path.glob hides
+    permission errors as 'no files', so check explicitly."""
+    import os
+
+    try:
+        os.listdir(folder)
+    except FileNotFoundError:
+        return f"{folder} does not exist"
+    except PermissionError:
+        return NO_ACCESS.format(folder=folder)
+    return None
+
+
+def daily(store: Store, parser: MealParser, photo_folder: str | Path, clarity_folder: str | Path,
+          tz: str = "America/Toronto") -> dict:
+    """The scheduled job: new Clarity exports, new meal photos, then insights."""
+    photo_folder, clarity_folder = Path(photo_folder), Path(clarity_folder)
+    problems = [p for p in (_readable(clarity_folder), _readable(photo_folder)) if p]
+    empty_photos = {"imported": [], "failed": []}
+    empty_clarity = {"files": 0, "readings": 0, "insulin_doses": 0}
+    report = {
+        "ran_at": datetime.now(timezone.utc).isoformat(),
+        "problems": problems,
+        "clarity": empty_clarity if _readable(clarity_folder) else import_new_clarity(store, clarity_folder, tz),
+        "photos": empty_photos if _readable(photo_folder) else import_photos(store, parser, photo_folder, tz),
+        "meals_logged_total": len(store.meals()),
+    }
+    report["insights"] = insights(store)
+    return report

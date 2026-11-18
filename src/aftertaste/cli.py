@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 DEFAULT_DB = "data/aftertaste.db"
 DEFAULT_TZ = "America/Toronto"
+ICLOUD_MEALS = "~/Library/Mobile Documents/com~apple~CloudDocs/Aftertaste/Meals"
 
 
 def _when(s: str | None, tz: str) -> datetime:
@@ -21,6 +22,30 @@ def _when(s: str | None, tz: str) -> datetime:
 
 def _print(obj) -> None:
     print(json.dumps(obj, indent=2, default=str))
+
+
+def _summary(report: dict) -> str:
+    if report.get("problems"):
+        return "Needs attention: " + report["problems"][0]
+    photos = report["photos"]
+    parts = [f"{len(photos['imported'])} meal(s) logged"]
+    if photos["failed"]:
+        parts.append(f"{len(photos['failed'])} photo(s) failed")
+    if report["clarity"]["files"]:
+        parts.append(f"{report['clarity']['readings']} glucose readings imported")
+    ev = report["insights"].get("evaluation")
+    if ev:
+        parts.append(f"model {ev['improvement_pct']}% vs carbs-only on {ev['n_test']} meals")
+    else:
+        parts.append(f"{report['insights']['clean_meals']} clean meals so far")
+    return ", ".join(parts)
+
+
+def _notify(text: str) -> None:
+    import subprocess
+
+    script = f'display notification {json.dumps(text)} with title "Aftertaste"'
+    subprocess.run(["osascript", "-e", script], check=False)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -36,6 +61,14 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("text", nargs="?")
     c.add_argument("--photo")
     c.add_argument("--at", help="when you ate, e.g. 2026-11-18T12:30 (default: now)")
+
+    c = sub.add_parser("import-photos", help="log every new meal photo in a folder (time = when taken)")
+    c.add_argument("folder", nargs="?", default=ICLOUD_MEALS)
+
+    c = sub.add_parser("daily", help="scheduled job: new Clarity exports + new meal photos + insights")
+    c.add_argument("--photos", default=ICLOUD_MEALS)
+    c.add_argument("--clarity", default="~/Downloads", help="folder to look for Clarity CSV exports")
+    c.add_argument("--notify", action="store_true", help="macOS notification with the summary")
 
     sub.add_parser("meals", help="list meals with measured and expected rises")
     sub.add_parser("insights", help="evaluate the model and show what drives your rises")
@@ -117,6 +150,28 @@ def main(argv: list[str] | None = None) -> int:
             print(f"could not estimate this meal: {e}", file=sys.stderr)
             return 1
         _print(service.meal_report(store, meal))
+    elif args.cmd == "import-photos":
+        from pathlib import Path
+
+        from .nutrition import ClaudeMealParser
+        from . import service
+
+        _print(service.import_photos(store, ClaudeMealParser(), Path(args.folder).expanduser(), args.tz))
+    elif args.cmd == "daily":
+        from pathlib import Path
+
+        from .nutrition import ClaudeMealParser
+        from . import service
+
+        report = service.daily(
+            store, ClaudeMealParser(), Path(args.photos).expanduser(), Path(args.clarity).expanduser(), args.tz
+        )
+        out = Path("data/reports") / f"{datetime.now(ZoneInfo(args.tz)):%Y-%m-%d}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(report, indent=2, default=str))
+        _print(report)
+        if args.notify:
+            _notify(_summary(report))
     elif args.cmd == "meals":
         from . import service
 

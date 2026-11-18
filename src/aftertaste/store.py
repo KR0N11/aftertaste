@@ -35,6 +35,12 @@ CREATE TABLE IF NOT EXISTS meals (
     photo_path  TEXT,
     nutrition   TEXT                      -- JSON, null until parsed
 );
+CREATE TABLE IF NOT EXISTS imported_files (
+    sha256      TEXT PRIMARY KEY,          -- each photo / export imported once
+    kind        TEXT NOT NULL,             -- "photo" | "clarity"
+    meal_id     INTEGER,
+    imported_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -150,6 +156,20 @@ class Store:
 
     def meal(self, meal_id: int) -> Meal | None:
         return next((m for m in self.meals() if m.id == meal_id), None)
+
+    # imported files -------------------------------------------------------
+    def imported_hashes(self, kind: str) -> set[str]:
+        rows = self.db.execute("SELECT sha256 FROM imported_files WHERE kind = ?", (kind,))
+        return {r[0] for r in rows}
+
+    def mark_imported(self, sha256: str, kind: str, meal_id: int | None = None) -> None:
+        from datetime import timezone
+
+        self.db.execute(
+            "INSERT OR IGNORE INTO imported_files (sha256, kind, meal_id, imported_at) VALUES (?, ?, ?, ?)",
+            (sha256, kind, meal_id, datetime.now(timezone.utc).isoformat()),
+        )
+        self.db.commit()
 
     # meta -----------------------------------------------------------------
     def get_meta(self, key: str) -> str | None:

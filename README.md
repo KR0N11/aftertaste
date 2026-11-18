@@ -49,6 +49,7 @@ Dexcom API v3 / Clarity CSV ──► glucose readings + insulin doses ───
 | HTTP API + CLI | built, tested; server run end to end on demo data |
 | Glucose-rise prediction on public data (CGMacros) | **measured**, see Results |
 | Carb estimation from photos (1,084 labelled CGMacros photos) | harness and labels ready; needs an API key to run |
+| Daily import (iCloud photos with EXIF time, Clarity exports) | built, tested, scheduled |
 | My own data | not collected yet |
 
 Results are added here only when measured. The simulator numbers further down
@@ -112,6 +113,21 @@ Claude credentials come from `ANTHROPIC_API_KEY` or `ant auth login`. Dexcom
 needs a developer app: `DEXCOM_CLIENT_ID`, `DEXCOM_CLIENT_SECRET`,
 `DEXCOM_REDIRECT_URI`, `DEXCOM_REGION` (`sandbox`, `us`, `ous` for outside the
 US, `jp`), then open `/dexcom/login` on the running server.
+
+## Daily workflow
+
+1. On the phone, save each meal photo to **Files > iCloud Drive > Aftertaste > Meals**
+   before eating. The meal time is read from the photo itself, not the upload.
+2. Now and then, export from Dexcom Clarity (Export, CSV) into `~/Downloads`.
+3. Every night at 22:30 a launchd job runs `aftertaste daily --notify`: it imports
+   new Clarity exports and new photos (each file once, by hash), retries photos
+   that failed, writes `data/reports/<date>.json` and shows a notification.
+
+Install: copy `scripts/aftertaste.daily.plist.example` to
+`~/Library/LaunchAgents/`, replace `$HOME`, then
+`launchctl bootstrap gui/$(id -u) <plist>`. The job runs `uv` directly so only
+that one program needs folder access; if macOS blocks Downloads or iCloud
+Drive, the notification says so instead of silently finding nothing.
 
 ## Tests
 
