@@ -1,0 +1,10 @@
+Index,Timestamp (YYYY-MM-DDThh:mm:ss),Event Type,Event Subtype,Patient Info,Device Info,Source Device ID,Glucose Value (mmol/L),Insulin Value (u),Carb Value (grams),Duration (hh:mm:ss),Glucose Rate of Change (mmol/L/min),Transmitter Time (Long Integer),Transmitter ID
+1,,FirstName,,Sample,,,,,,,,,
+2,,LastName,,Patient,,,,,,,,,
+3,,Device,,,Dexcom G7,,,,,,,,
+4,2026-03-02T12:00:00,EGV,,,,iOS G7,6.1,,,,0.0,1000,AB12
+5,2026-03-02T12:05:00,EGV,,,,iOS G7,Low,,,,,1300,AB12
+6,2026-03-02T12:10:00,EGV,,,,iOS G7,High,,,,,1600,AB12
+7,2026-03-02T12:12:00,Insulin,Fast-Acting,,,iOS G7,,4.5,,,,,
+8,2026-03-02T22:00:00,Insulin,Long-Acting,,,iOS G7,,18,,,,,
+9,2026-03-02T12:15:00,Carbs,,,,iOS G7,,,45,,,,
