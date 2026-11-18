@@ -1,8 +1,19 @@
-"""Meal photo or text -> carbs, fibre, fat, protein, using Claude.
+"""Meal photo or text -> carbs, fibre, fat, protein, using Claude through a
+small LangGraph workflow.
+
+    estimate ──► check ──► accept
+       ▲           │
+       └─ retry ◄──┘   (flagged, first pass only: re-estimate at higher effort)
+
+`check` is plain code, not a model call: it flags estimates that are
+physically impossible (fibre above total carbs), implausibly large, empty, or
+low confidence. A flagged first pass is re-run once at higher effort with the
+problems listed; if the second pass is still flagged, the meal is kept but
+marked low confidence so it never drives a prediction silently.
 
 Design rules:
-  * Claude only sees the meal (photo and/or text). Never glucose, insulin,
-    or anything about the person.
+  * Claude only sees the meal (photo and/or text) and, on a retry, the list of
+    problems `check` found. Never glucose, insulin, or anything about the person.
   * Claude estimates per item; totals are summed here in code, so the model
     never does arithmetic that ends up in a number we report.
   * Low confidence is a first-class answer. A wrong carb count is worse than
@@ -13,15 +24,24 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+from functools import cached_property
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Callable, Literal, Protocol, TypedDict
 
 import anthropic
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
 from .models import Nutrition
 
 MODEL = "claude-opus-5-5"
+FIRST_EFFORT = "medium"
+RETRY_EFFORT = "high"
+MAX_ATTEMPTS = 2
+MAX_ITEM_CARBS_G = 250.0
+MAX_MEAL_CARBS_G = 400.0
 
 SYSTEM = """You estimate the nutrition of a meal from a photo and/or a short description.
 
@@ -62,17 +82,40 @@ class MealParser(Protocol):
     def parse(self, text: str | None = None, photo: str | Path | None = None) -> Nutrition: ...
 
 
-def to_nutrition(estimate: MealEstimate) -> Nutrition:
+def to_nutrition(estimate: MealEstimate, problems: list[str] | None = None) -> Nutrition:
     items = estimate.items
+    confidence = estimate.confidence if items else "low"
+    notes = estimate.assumptions
+    if problems:
+        confidence = "low"
+        notes = f"flagged: {'; '.join(problems)}. {notes}".strip()
     return Nutrition(
         carbs_g=round(sum(i.carbs_g for i in items), 1),
         fiber_g=round(sum(i.fiber_g for i in items), 1),
         fat_g=round(sum(i.fat_g for i in items), 1),
         protein_g=round(sum(i.protein_g for i in items), 1),
-        confidence=estimate.confidence if items else "low",
+        confidence=confidence,
         items=tuple(f"{i.name} ({i.portion})" for i in items),
-        notes=estimate.assumptions,
+        notes=notes,
     )
+
+
+def check(estimate: MealEstimate) -> list[str]:
+    """Deterministic sanity checks. An empty list means the estimate passes."""
+    problems: list[str] = []
+    if not estimate.items:
+        problems.append("no food items found")
+    for i in estimate.items:
+        if i.fiber_g > i.carbs_g:
+            problems.append(f"{i.name}: fibre ({i.fiber_g:g} g) exceeds total carbs ({i.carbs_g:g} g)")
+        if i.carbs_g > MAX_ITEM_CARBS_G:
+            problems.append(f"{i.name}: {i.carbs_g:g} g carbs is implausible for one item")
+    total = sum(i.carbs_g for i in estimate.items)
+    if total > MAX_MEAL_CARBS_G:
+        problems.append(f"meal total of {total:g} g carbs is implausible")
+    if estimate.confidence == "low" and estimate.items:
+        problems.append("low confidence")
+    return problems
 
 
 def _image_block(photo: str | Path) -> dict:
@@ -94,40 +137,117 @@ def build_content(text: str | None, photo: str | Path | None) -> list[dict]:
     return content
 
 
+def retry_content(content: list[dict], problems: list[str]) -> list[dict]:
+    note = (
+        "A first estimate of this meal was flagged by automatic checks: "
+        + "; ".join(problems)
+        + ". Look again carefully and give a corrected estimate."
+    )
+    return [*content, {"type": "text", "text": note}]
+
+
+# --- the model call ---------------------------------------------------------
+
+# (content blocks, effort) -> (parsed estimate or None, stop_reason)
+Estimator = Callable[[list[dict], str], tuple[MealEstimate | None, str | None]]
+
+
+class _ChatAnthropic(ChatAnthropic):
+    """ChatAnthropic always hands the SDK an explicit api_key (empty when
+    ANTHROPIC_API_KEY is unset), which bypasses the SDK's own credential
+    lookup and so breaks `ant auth login`. Build the client the SDK's way."""
+
+    @cached_property
+    def _client(self) -> anthropic.Anthropic:
+        try:
+            return anthropic.Anthropic(max_retries=self.max_retries)
+        except anthropic.CredentialsError as e:
+            raise ParseError(
+                "no Anthropic credentials: set ANTHROPIC_API_KEY or run `ant auth login`"
+            ) from e
+
+
+def chat_model(model: str = MODEL, effort: str = FIRST_EFFORT) -> ChatAnthropic:
+    return _ChatAnthropic(
+        model=model,
+        max_tokens=16000,
+        effort=effort,
+        # On a safety decline the API re-runs the request on a fallback model.
+        betas=["server-side-fallback-2026-07-01"],
+        model_kwargs={"fallbacks": "default"},
+    )
+
+
+def langchain_estimator(model: str = MODEL) -> Estimator:
+    chains = {}
+
+    def estimate(content: list[dict], effort: str) -> tuple[MealEstimate | None, str | None]:
+        if effort not in chains:
+            chains[effort] = chat_model(model, effort).with_structured_output(
+                MealEstimate, method="json_schema", include_raw=True
+            )
+        out = chains[effort].invoke([SystemMessage(SYSTEM), HumanMessage(content=content)])
+        stop_reason = out["raw"].response_metadata.get("stop_reason")
+        return out["parsed"], stop_reason
+
+    return estimate
+
+
+# --- the graph --------------------------------------------------------------
+
+class MealState(TypedDict, total=False):
+    content: list[dict]
+    attempts: int
+    estimate: MealEstimate | None
+    stop_reason: str | None
+    problems: list[str]
+
+
+def build_graph(estimator: Estimator):
+    def estimate_node(state: MealState) -> MealState:
+        attempts = state.get("attempts", 0)
+        content = state["content"]
+        effort = FIRST_EFFORT
+        if attempts:
+            content = retry_content(content, state["problems"])
+            effort = RETRY_EFFORT
+        estimate, stop_reason = estimator(content, effort)
+        return {"estimate": estimate, "stop_reason": stop_reason, "attempts": attempts + 1}
+
+    def check_node(state: MealState) -> MealState:
+        estimate = state.get("estimate")
+        return {"problems": check(estimate) if estimate is not None else []}
+
+    def route(state: MealState) -> str:
+        if state.get("estimate") is None:
+            return END
+        if state["problems"] and state["attempts"] < MAX_ATTEMPTS:
+            return "estimate"
+        return END
+
+    graph = StateGraph(MealState)
+    graph.add_node("estimate", estimate_node)
+    graph.add_node("check", check_node)
+    graph.add_edge(START, "estimate")
+    graph.add_edge("estimate", "check")
+    graph.add_conditional_edges("check", route, ["estimate", END])
+    return graph.compile()
+
+
 class ClaudeMealParser:
-    def __init__(self, client: anthropic.Anthropic | None = None, model: str = MODEL) -> None:
-        # Created on first use, so the app still starts (and shows existing
-        # data) on a machine without Anthropic credentials.
-        self._client = client
+    def __init__(self, estimator: Estimator | None = None, model: str = MODEL) -> None:
+        # The model client is created on first use, so the app still starts
+        # (and shows existing data) on a machine without Anthropic credentials.
         self.model = model
+        self.graph = build_graph(estimator or langchain_estimator(model))
 
-    @property
-    def client(self) -> anthropic.Anthropic:
-        if self._client is None:
-            try:
-                self._client = anthropic.Anthropic()
-            except anthropic.CredentialsError as e:
-                raise ParseError(
-                    "no Anthropic credentials: set ANTHROPIC_API_KEY or run `ant auth login`"
-                ) from e
-        return self._client
-
-    def estimate(self, text: str | None = None, photo: str | Path | None = None) -> MealEstimate:
-        response = self.client.beta.messages.parse(
-            model=self.model,
-            max_tokens=16000,
-            system=SYSTEM,
-            messages=[{"role": "user", "content": build_content(text, photo)}],
-            output_format=MealEstimate,
-            output_config={"effort": "medium"},
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-        )
-        if response.stop_reason == "refusal":
-            raise ParseError("the model declined this input; enter the meal by hand")
-        if response.stop_reason == "max_tokens" or response.parsed_output is None:
-            raise ParseError(f"no usable estimate (stop_reason={response.stop_reason})")
-        return response.parsed_output
+    def run(self, text: str | None = None, photo: str | Path | None = None) -> MealState:
+        return self.graph.invoke({"content": build_content(text, photo)})
 
     def parse(self, text: str | None = None, photo: str | Path | None = None) -> Nutrition:
-        return to_nutrition(self.estimate(text, photo))
+        state = self.run(text, photo)
+        if state["stop_reason"] == "refusal":
+            raise ParseError("the model declined this input; enter the meal by hand")
+        if state["estimate"] is None:
+            raise ParseError(f"no usable estimate (stop_reason={state['stop_reason']})")
+        return to_nutrition(state["estimate"], state["problems"])

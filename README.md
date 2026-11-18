@@ -14,7 +14,7 @@ that takes one as input. Talk to your care team before changing anything.
 ## How it works
 
 ```
-meal photo / text ──► Claude ──► per-item carbs, fibre, fat, protein ──► totals summed in code
+meal photo / text ──► Claude (LangGraph) ──► per-item carbs, fibre, fat, protein ──► totals summed in code
                                                                               │
 Dexcom API v3 / Clarity CSV ──► glucose readings + insulin doses ─────────────┤
                                                                               ▼
@@ -27,6 +27,19 @@ Dexcom API v3 / Clarity CSV ──► glucose readings + insulin doses ───
   nothing else: no glucose, no insulin, nothing about me. It returns a
   validated schema of items; totals are added in code, so no reported number
   comes from model arithmetic. Low confidence is an allowed answer.
+- **Meal parsing is a small LangGraph workflow.** `estimate` calls Claude
+  through LangChain (`ChatAnthropic`, JSON-schema structured output);
+  `check` is plain code that flags impossible or implausible estimates (fibre
+  above total carbs, over 250 g carbs in one item or 400 g in a meal, no items,
+  low confidence). A flagged first pass is re-run once at higher effort with
+  the problems listed; if it is still flagged, the meal is kept but marked low
+  confidence.
+
+  ```
+  estimate ──► check ──► done
+     ▲           │
+     └── retry ◄─┘  (flagged, first pass only)
+  ```
 - **All glucose maths is deterministic and tested.** A meal whose trace has a
   gap over 20 min in the first 2 h is marked invalid with a reason, never
   scored as "no rise".
@@ -43,7 +56,7 @@ Dexcom API v3 / Clarity CSV ──► glucose readings + insulin doses ───
 
 | Part | State |
 |---|---|
-| Meal parsing (Claude, structured output) | built, tested against a fake client; live run needs an API key |
+| Meal parsing (Claude via LangChain + LangGraph, structured output, check-and-retry) | built, tested with a fake model and a fake API response through LangChain; live run needs an API key |
 | Dexcom API v3 OAuth + sync, Clarity CSV import (mg/dL and mmol/L) | built, tested with mocked HTTP and a fixture export |
 | Response maths, IOB, features, chronological eval | built, tested on known traces |
 | HTTP API + CLI | built, tested; server run end to end on demo data |
