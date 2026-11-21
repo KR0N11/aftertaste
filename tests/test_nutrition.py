@@ -5,7 +5,7 @@ from anthropic.types.beta import BetaMessage
 
 from aftertaste import nutrition
 from aftertaste.nutrition import (
-    FIRST_EFFORT, MODEL, RETRY_EFFORT, ClaudeMealParser, Item, MealEstimate, ParseError,
+    FIRST_EFFORT, MODEL, RETRY_EFFORT, LLMMealParser, Item, MealEstimate, ParseError,
     build_content, check, langchain_estimator, to_nutrition,
 )
 
@@ -91,14 +91,14 @@ def test_rejects_unsupported_files_and_empty_input(tmp_path):
 
 def test_clean_estimate_is_accepted_in_one_pass():
     fake = FakeEstimator((PIZZA, "end_turn"))
-    n = ClaudeMealParser(fake).parse(text="2 slices pepperoni pizza and a coke")
+    n = LLMMealParser(fake).parse(text="2 slices pepperoni pizza and a coke")
     assert len(fake.calls) == 1 and fake.calls[0][1] == FIRST_EFFORT
     assert n.carbs_g == 111.4 and n.confidence == "medium"
 
 
 def test_flagged_estimate_is_retried_once_at_higher_effort_with_the_problems():
     fake = FakeEstimator((BAD_FIBRE, "end_turn"), (OATMEAL, "end_turn"))
-    n = ClaudeMealParser(fake).parse(text="bowl of oatmeal")
+    n = LLMMealParser(fake).parse(text="bowl of oatmeal")
     assert [effort for _, effort in fake.calls] == [FIRST_EFFORT, RETRY_EFFORT]
     retry_text = json.dumps(fake.calls[1][0])
     assert "exceeds total carbs" in retry_text and "oatmeal" in retry_text
@@ -107,16 +107,16 @@ def test_flagged_estimate_is_retried_once_at_higher_effort_with_the_problems():
 
 def test_still_flagged_after_retry_is_kept_but_marked_low_confidence():
     fake = FakeEstimator((BAD_FIBRE, "end_turn"), (BAD_FIBRE, "end_turn"))
-    n = ClaudeMealParser(fake).parse(text="bowl of oatmeal")
+    n = LLMMealParser(fake).parse(text="bowl of oatmeal")
     assert len(fake.calls) == 2
     assert n.confidence == "low" and n.notes.startswith("flagged: oatmeal: fibre")
 
 
 def test_refusal_and_truncation_raise():
     with pytest.raises(ParseError, match="declined"):
-        ClaudeMealParser(FakeEstimator((None, "refusal"))).parse(text="x")
+        LLMMealParser(FakeEstimator((None, "refusal"))).parse(text="x")
     with pytest.raises(ParseError, match="max_tokens"):
-        ClaudeMealParser(FakeEstimator((None, "max_tokens"))).parse(text="x")
+        LLMMealParser(FakeEstimator((None, "max_tokens"))).parse(text="x")
 
 
 # --- the LangChain call, against a fake API response -----------------------------
@@ -178,6 +178,66 @@ def test_missing_credentials_fail_at_parse_time_not_startup(monkeypatch):
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setattr(anthropic, "Anthropic", no_creds)
-    parser = ClaudeMealParser()  # must not raise
+    parser = LLMMealParser(langchain_estimator())  # must not raise
     with pytest.raises(ParseError, match="no Anthropic credentials"):
         parser.parse(text="toast")
+
+
+# --- local backend (Ollama) ----------------------------------------------------
+
+def test_ollama_content_turns_image_blocks_into_data_urls(tmp_path):
+    photo = tmp_path / "meal.png"
+    photo.write_bytes(b"\x89PNG fake")
+    out = nutrition.to_ollama_content(build_content("rice", photo))
+    assert out[0]["type"] == "image_url"
+    assert out[0]["image_url"].startswith("data:image/png;base64,")
+    assert out[1] == {"type": "text", "text": "Meal: rice"}
+
+
+def test_default_backend_is_local_and_needs_no_api_key(monkeypatch):
+    monkeypatch.delenv("AFTERTASTE_LLM", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("AFTERTASTE_LOCAL_MODEL", "some-vl:1b")
+    assert nutrition.model_label() == "some-vl:1b"
+    LLMMealParser()  # builds without credentials or a running server
+
+
+def test_claude_backend_is_opt_in(monkeypatch):
+    monkeypatch.setenv("AFTERTASTE_LLM", "claude")
+    assert nutrition.model_label() == MODEL
+    monkeypatch.setenv("AFTERTASTE_LLM", "gpt")
+    with pytest.raises(ParseError, match="unknown AFTERTASTE_LLM"):
+        nutrition.default_estimator()
+
+
+def test_ollama_estimator_sends_schema_and_only_meal_content(monkeypatch):
+    import ollama
+
+    sent = []
+
+    def fake_chat(self, **kwargs):
+        sent.append(kwargs)
+        reply = {"model": "m", "done": True, "done_reason": "stop",
+                 "message": {"role": "assistant", "content": PIZZA.model_dump_json()}}
+        return iter([reply]) if kwargs.get("stream") else reply
+
+    monkeypatch.setattr(ollama.Client, "chat", fake_chat)
+    estimate, stop = nutrition.ollama_estimator("m")(build_content("2 slices pepperoni pizza and a coke", None), "high")
+    assert estimate == PIZZA and stop == "stop"
+    req = sent[0]
+    assert req["format"]["properties"].keys() >= {"items", "confidence"}
+    user = [m for m in req["messages"] if m["role"] == "user"]
+    text = json.dumps(user, default=str)
+    assert "pepperoni" in text and "mg/dL" not in text and "insulin" not in text.lower()
+
+
+def test_ollama_not_running_is_a_parse_error(monkeypatch):
+    import httpx
+    import ollama
+
+    def down(self, **kwargs):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(ollama.Client, "chat", down)
+    with pytest.raises(ParseError, match="ollama serve"):
+        LLMMealParser(nutrition.ollama_estimator("m")).parse(text="toast")

@@ -1,5 +1,10 @@
-"""Meal photo or text -> carbs, fibre, fat, protein, using Claude through a
-small LangGraph workflow.
+"""Meal photo or text -> carbs, fibre, fat, protein, using a vision LLM through
+a small LangGraph workflow.
+
+Two interchangeable model backends sit behind the same graph:
+  * local (default): an open-weights vision model served by Ollama on this
+    machine. No API key, and the meal photo never leaves the computer.
+  * claude: Claude through the Anthropic API (set AFTERTASTE_LLM=claude).
 
     estimate ──► check ──► accept
        ▲           │
@@ -24,6 +29,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import os
 from functools import cached_property
 from pathlib import Path
 from typing import Callable, Literal, Protocol, TypedDict
@@ -193,6 +199,74 @@ def langchain_estimator(model: str = MODEL) -> Estimator:
     return estimate
 
 
+# --- local model (default): Ollama ------------------------------------------
+
+LOCAL_MODEL = "qwen3-vl:8b-instruct"  # the default qwen3-vl:8b tag is the slower thinking variant
+
+
+def local_model_name() -> str:
+    return os.environ.get("AFTERTASTE_LOCAL_MODEL", LOCAL_MODEL)
+
+
+def to_ollama_content(content: list[dict]) -> list[dict]:
+    """Anthropic-style image blocks -> data-URL image parts LangChain's Ollama
+    adapter understands. Text blocks pass through unchanged."""
+    out = []
+    for block in content:
+        if block["type"] == "image":
+            src = block["source"]
+            out.append({"type": "image_url", "image_url": f"data:{src['media_type']};base64,{src['data']}"})
+        else:
+            out.append(block)
+    return out
+
+
+def ollama_estimator(model: str | None = None, base_url: str | None = None) -> Estimator:
+    """Same contract as the Claude estimator. `effort` has no local equivalent,
+    so a retry differs only by the list of problems the check found."""
+    import httpx
+    import ollama
+    from langchain_ollama import ChatOllama
+
+    model = model or local_model_name()
+    chain = None
+
+    def estimate(content: list[dict], effort: str) -> tuple[MealEstimate | None, str | None]:
+        nonlocal chain
+        if chain is None:
+            # Qwen's recommended sampling for its VL instruct mode. Greedy decoding
+            # (temperature 0) makes these models loop; the fixed seed keeps
+            # eval runs reproducible.
+            llm = ChatOllama(
+                model=model, base_url=base_url, reasoning=False, num_ctx=8192, num_predict=2048,
+                temperature=0.7, top_p=0.8, top_k=20, seed=0,
+            )
+            chain = llm.with_structured_output(MealEstimate, method="json_schema", include_raw=True)
+        try:
+            out = chain.invoke([SystemMessage(SYSTEM), HumanMessage(content=to_ollama_content(content))])
+        except (ConnectionError, httpx.ConnectError) as e:
+            raise ParseError("local model not reachable: start it with `ollama serve`") from e
+        except ollama.ResponseError as e:
+            raise ParseError(f"local model error ({model}): {e}. Try `ollama pull {model}`") from e
+        return out["parsed"], out["raw"].response_metadata.get("done_reason")
+
+    return estimate
+
+
+def default_estimator() -> Estimator:
+    backend = os.environ.get("AFTERTASTE_LLM", "local")
+    if backend == "local":
+        return ollama_estimator()
+    if backend == "claude":
+        return langchain_estimator()
+    raise ParseError(f"unknown AFTERTASTE_LLM={backend!r}; use 'local' or 'claude'")
+
+
+def model_label() -> str:
+    """Which model the default parser uses, for eval reports and cache folders."""
+    return local_model_name() if os.environ.get("AFTERTASTE_LLM", "local") == "local" else MODEL
+
+
 # --- the graph --------------------------------------------------------------
 
 class MealState(TypedDict, total=False):
@@ -234,12 +308,11 @@ def build_graph(estimator: Estimator):
     return graph.compile()
 
 
-class ClaudeMealParser:
-    def __init__(self, estimator: Estimator | None = None, model: str = MODEL) -> None:
+class LLMMealParser:
+    def __init__(self, estimator: Estimator | None = None) -> None:
         # The model client is created on first use, so the app still starts
-        # (and shows existing data) on a machine without Anthropic credentials.
-        self.model = model
-        self.graph = build_graph(estimator or langchain_estimator(model))
+        # (and shows existing data) when no model is reachable.
+        self.graph = build_graph(estimator or default_estimator())
 
     def run(self, text: str | None = None, photo: str | Path | None = None) -> MealState:
         return self.graph.invoke({"content": build_content(text, photo)})

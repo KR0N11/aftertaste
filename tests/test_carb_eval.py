@@ -43,3 +43,13 @@ def test_cache_avoids_paying_twice(tmp_path):
     first = parser.calls
     run(load_cases(csv_path), parser, cache_dir=tmp_path / "cache")
     assert parser.calls - first == 1  # only the failed one is retried
+
+
+def test_sample_is_fixed_by_seed_and_keeps_order():
+    from aftertaste.carb_eval import Case, sample
+
+    cases = [Case(str(i), "", None, float(i)) for i in range(50)]
+    a, b = sample(cases, 10, seed=3), sample(cases, 10, seed=3)
+    assert [c.id for c in a] == [c.id for c in b]
+    assert len(a) == 10 and [int(c.id) for c in a] == sorted(int(c.id) for c in a)
+    assert sample(cases, None) == cases

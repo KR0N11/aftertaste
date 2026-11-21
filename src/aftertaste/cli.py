@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 DEFAULT_DB = "data/aftertaste.db"
@@ -79,6 +80,8 @@ def main(argv: list[str] | None = None) -> int:
     c = sub.add_parser("carb-eval", help="score carb estimates against a labelled CSV")
     c.add_argument("csv")
     c.add_argument("--out", default="eval/results")
+    c.add_argument("--limit", type=int, help="score a fixed random sample of this many meals")
+    c.add_argument("--seed", type=int, default=0, help="seed for --limit sampling")
 
     c = sub.add_parser("cgmacros-eval", help="glucose-rise prediction on the public CGMacros dataset")
     c.add_argument("root", help="folder containing CGMacros-0XX folders and bio.csv")
@@ -113,7 +116,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "cgmacros-eval":
-        from pathlib import Path
 
         from .cgmacros import evaluate_personalized
 
@@ -139,32 +141,30 @@ def main(argv: list[str] | None = None) -> int:
         store.add_doses(doses)
         _print({"readings": len(readings), "insulin_doses": len(doses)})
     elif args.cmd == "log":
-        from .nutrition import ClaudeMealParser, ParseError
+        from .nutrition import LLMMealParser, ParseError
         from . import service
 
         if not args.text and not args.photo:
             p.error("log needs a description, --photo, or both")
         try:
-            meal = service.log_meal(store, ClaudeMealParser(), _when(args.at, args.tz), args.text, args.photo)
+            meal = service.log_meal(store, LLMMealParser(), _when(args.at, args.tz), args.text, args.photo)
         except ParseError as e:
             print(f"could not estimate this meal: {e}", file=sys.stderr)
             return 1
         _print(service.meal_report(store, meal))
     elif args.cmd == "import-photos":
-        from pathlib import Path
 
-        from .nutrition import ClaudeMealParser
+        from .nutrition import LLMMealParser
         from . import service
 
-        _print(service.import_photos(store, ClaudeMealParser(), Path(args.folder).expanduser(), args.tz))
+        _print(service.import_photos(store, LLMMealParser(), Path(args.folder).expanduser(), args.tz))
     elif args.cmd == "daily":
-        from pathlib import Path
 
-        from .nutrition import ClaudeMealParser
+        from .nutrition import LLMMealParser
         from . import service
 
         report = service.daily(
-            store, ClaudeMealParser(), Path(args.photos).expanduser(), Path(args.clarity).expanduser(), args.tz
+            store, LLMMealParser(), Path(args.photos).expanduser(), Path(args.clarity).expanduser(), args.tz
         )
         out = Path("data/reports") / f"{datetime.now(ZoneInfo(args.tz)):%Y-%m-%d}.json"
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -186,10 +186,13 @@ def main(argv: list[str] | None = None) -> int:
 
         _print(service.sync_dexcom(store, DexcomClient.from_env(), days=args.days))
     elif args.cmd == "carb-eval":
-        from .carb_eval import load_cases, run, summarize, write_report
-        from .nutrition import ClaudeMealParser
+        from .carb_eval import load_cases, run, sample, summarize, write_report
+        from .nutrition import LLMMealParser, model_label
 
-        summary = summarize(run(load_cases(args.csv), ClaudeMealParser()))
+        model = model_label()
+        cases = sample(load_cases(args.csv), args.limit, args.seed)
+        summary = summarize(run(cases, LLMMealParser(), cache_dir=Path("eval_cache") / model.replace(":", "_")))
+        summary = {"model": model, "sample": f"{args.limit} of csv, seed {args.seed}" if args.limit else "all", **summary}
         write_report(summary, args.out)
         _print(summary)
     elif args.cmd == "serve":
@@ -197,13 +200,13 @@ def main(argv: list[str] | None = None) -> int:
 
         from .api import create_app
         from .dexcom import DexcomClient, DexcomError
-        from .nutrition import ClaudeMealParser
+        from .nutrition import LLMMealParser
 
         try:
             dexcom = DexcomClient.from_env()
         except DexcomError:
             dexcom = None
-        uvicorn.run(create_app(store, ClaudeMealParser(), dexcom), host="127.0.0.1", port=args.port)
+        uvicorn.run(create_app(store, LLMMealParser(), dexcom), host="127.0.0.1", port=args.port)
     return 0
 
 

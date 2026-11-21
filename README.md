@@ -14,7 +14,7 @@ that takes one as input. Talk to your care team before changing anything.
 ## How it works
 
 ```
-meal photo / text ──► Claude (LangGraph) ──► per-item carbs, fibre, fat, protein ──► totals summed in code
+meal photo / text ──► vision LLM (LangGraph) ──► per-item carbs, fibre, fat, protein ──► totals summed in code
                                                                               │
 Dexcom API v3 / Clarity CSV ──► glucose readings + insulin doses ─────────────┤
                                                                               ▼
@@ -23,16 +23,20 @@ Dexcom API v3 / Clarity CSV ──► glucose readings + insulin doses ───
               ridge model vs carbs-only baseline, tested on later meals only
 ```
 
-- **The LLM only reads food.** Claude gets the meal photo and/or description,
+- **Runs locally by default.** The meal parser uses an open-weights vision
+  model (Qwen3-VL 8B Instruct) through Ollama on the same machine: no API key, and meal
+  photos never leave the computer. Claude through the Anthropic API is a
+  drop-in alternative (`AFTERTASTE_LLM=claude`); both sit behind the same graph.
+- **The LLM only reads food.** The model gets the meal photo and/or description,
   nothing else: no glucose, no insulin, nothing about me. It returns a
   validated schema of items; totals are added in code, so no reported number
   comes from model arithmetic. Low confidence is an allowed answer.
-- **Meal parsing is a small LangGraph workflow.** `estimate` calls Claude
-  through LangChain (`ChatAnthropic`, JSON-schema structured output);
+- **Meal parsing is a small LangGraph workflow.** `estimate` calls the model
+  through LangChain (`ChatOllama` or `ChatAnthropic`, JSON-schema structured output);
   `check` is plain code that flags impossible or implausible estimates (fibre
   above total carbs, over 250 g carbs in one item or 400 g in a meal, no items,
-  low confidence). A flagged first pass is re-run once at higher effort with
-  the problems listed; if it is still flagged, the meal is kept but marked low
+  low confidence). A flagged first pass is re-run once with the problems
+  listed (on Claude, also at higher effort); if it is still flagged, the meal is kept but marked low
   confidence.
 
   ```
@@ -56,7 +60,7 @@ Dexcom API v3 / Clarity CSV ──► glucose readings + insulin doses ───
 
 | Part | State |
 |---|---|
-| Meal parsing (Claude via LangChain + LangGraph, structured output, check-and-retry) | built, tested with a fake model and a fake API response through LangChain; live run needs an API key |
+| Meal parsing (local Qwen3-VL via Ollama, or Claude; LangChain + LangGraph, structured output, check-and-retry) | built, tested with fake model responses; run live with the local model |
 | Dexcom API v3 OAuth + sync, Clarity CSV import (mg/dL and mmol/L) | built, tested with mocked HTTP and a fixture export |
 | Response maths, IOB, features, chronological eval | built, tested on known traces |
 | HTTP API + CLI | built, tested; server run end to end on demo data |
@@ -119,10 +123,13 @@ uv run aftertaste meals                               # measured vs expected ris
 uv run aftertaste insights                            # evaluation + what drives your rises
 uv run aftertaste serve                               # HTTP API on 127.0.0.1:8000 (/docs)
 uv run aftertaste demo                                # synthetic data, for trying it out
-uv run aftertaste carb-eval labels.csv                # id,description,photo,true_carbs_g
+uv run aftertaste carb-eval labels.csv --limit 200   # id,description,photo,true_carbs_g; fixed random sample
 ```
 
-Claude credentials come from `ANTHROPIC_API_KEY` or `ant auth login`. Dexcom
+The meal parser needs Ollama running locally (`brew install ollama`,
+`ollama serve`, `ollama pull qwen3-vl:8b-instruct`; another model via
+`AFTERTASTE_LOCAL_MODEL`). To use Claude instead, set `AFTERTASTE_LLM=claude`;
+credentials come from `ANTHROPIC_API_KEY` or `ant auth login`. Dexcom
 needs a developer app: `DEXCOM_CLIENT_ID`, `DEXCOM_CLIENT_SECRET`,
 `DEXCOM_REDIRECT_URI`, `DEXCOM_REGION` (`sandbox`, `us`, `ous` for outside the
 US, `jp`), then open `/dexcom/login` on the running server.

@@ -67,3 +67,21 @@ def test_cli_demo_and_import(tmp_path, capsys):
     fixture = __file__.replace("test_api_cli.py", "fixtures/clarity_mmol.csv")
     assert main(["--db", str(db), "import-clarity", fixture]) == 0
     assert json.loads(capsys.readouterr().out) == {"readings": 3, "insulin_doses": 2}
+
+
+def test_cli_carb_eval_samples_and_caches_per_model(tmp_path, monkeypatch, capsys):
+    from aftertaste import nutrition
+
+    class Fixed:
+        def parse(self, text=None, photo=None):
+            return Nutrition(carbs_g=40.0, fiber_g=0, fat_g=0, protein_g=0, confidence="medium")
+
+    monkeypatch.setattr(nutrition, "LLMMealParser", lambda: Fixed())
+    monkeypatch.setenv("AFTERTASTE_LOCAL_MODEL", "fake-vl:1b")
+    monkeypatch.chdir(tmp_path)
+    csv = tmp_path / "labels.csv"
+    csv.write_text("id,description,photo,true_carbs_g\n" + "".join(f"m{i},rice,,{30 + i}\n" for i in range(10)))
+    main(["carb-eval", str(csv), "--limit", "4", "--out", "out"])
+    summary = json.loads((tmp_path / "out" / "carb_eval.json").read_text())
+    assert summary["model"] == "fake-vl:1b" and summary["n_cases"] == 4
+    assert len(list((tmp_path / "eval_cache" / "fake-vl_1b").iterdir())) == 4

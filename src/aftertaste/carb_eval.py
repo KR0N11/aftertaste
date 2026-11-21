@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean, median
@@ -59,6 +60,14 @@ def load_cases(csv_path: str | Path) -> list[Case]:
                 )
             )
     return out
+
+
+def sample(cases: list[Case], limit: int | None, seed: int = 0) -> list[Case]:
+    """A fixed random subset (same seed -> same meals), in the CSV's order."""
+    if not limit or limit >= len(cases):
+        return cases
+    keep = set(random.Random(seed).sample(range(len(cases)), limit))
+    return [c for i, c in enumerate(cases) if i in keep]
 
 
 def _cache_key(case: Case) -> str:
@@ -124,6 +133,7 @@ def to_markdown(summary: dict) -> str:
     lines = [
         "# Carb estimation eval",
         "",
+        *([f"- Model: {summary['model']} (sample: {summary.get('sample', 'all')})"] if "model" in summary else []),
         f"- Meals: {summary['n_cases']} ({summary['n_failed']} failed to parse, counted below as unscored)",
         f"- Mean absolute error: {summary['mae_g']} g",
         f"- Median absolute error: {summary['median_ae_g']} g",
