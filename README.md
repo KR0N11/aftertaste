@@ -65,7 +65,7 @@ Dexcom API v3 / Clarity CSV ──► glucose readings + insulin doses ───
 | Response maths, IOB, features, chronological eval | built, tested on known traces |
 | HTTP API + CLI | built, tested; server run end to end on demo data |
 | Glucose-rise prediction on public data (CGMacros) | **measured**, see Results |
-| Carb estimation from photos (1,084 labelled CGMacros photos) | harness and labels ready; needs an API key to run |
+| Carb estimation from photos (CGMacros) | **measured** on 200 photos with the local model, see Results |
 | Daily import (iCloud photos with EXIF time, Clarity exports) | built, tested, scheduled |
 | My own data | not collected yet |
 
@@ -102,6 +102,40 @@ per gram, from earlier meals only, leave-one-out, plus A1c). Adding fat,
 protein and fibre on top barely helps here. A model shared across people
 did not beat carb counting at all, which was the first thing tried; the
 personal features were added after that, and both results are reported.
+
+### Carb estimates from meal photos (local model)
+
+Qwen3-VL 8B Instruct (Ollama, 4-bit, on a MacBook) on a fixed random sample of
+**200 CGMacros meal photos** (seed 0, 33 people), photo only, no description.
+The labels are the dataset's own carb estimates per meal, not lab
+measurements. Reproduce with
+`aftertaste carb-eval data/cgmacros/labels.csv --limit 200 --seed 0`
+([eval/results/carb_eval.md](eval/results/carb_eval.md)). 0 of 200 failed to parse.
+
+| On the same 200 meals | MAE | Within ±10 g |
+|---|---|---|
+| Constant guess (median of the other 884 labelled meals, 47 g) | 28.5 g | 11% |
+| **Local model, all meals** | **32.7 g** | 23.5% |
+
+| Model's own confidence | Meals | Model MAE | Constant guess on the same meals |
+|---|---|---|---|
+| high | 24 | 23.0 g | 34.5 g |
+| medium | 165 | 32.5 g | |
+| low | 11 | 56.1 g | |
+
+What this says, plainly:
+
+- **Overall, the local model does not beat a constant guess** on mean error.
+  It is closer more often (23.5% vs 11% within 10 g) but misses big.
+- **It underestimates**: mean estimate 29 g vs mean label 54 g (rank
+  correlation 0.37), so most of the error is a consistent bias, not noise.
+- **Its confidence is informative**: error rises from 23 g (high) to 56 g
+  (low), and on high-confidence meals it beats the constant guess. This is
+  why low-confidence meals are flagged and never drive a prediction silently.
+- So carb estimates from this model are a starting point for the user to
+  confirm, not a number to trust. The photos are hard (partial plates,
+  packaged food, shakes), and an 8B model on a laptop is far smaller than a
+  hosted model; the Claude backend has not been scored yet.
 
 ### Pipeline check on synthetic data (not a result)
 

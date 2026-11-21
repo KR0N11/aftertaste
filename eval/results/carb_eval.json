@@ -1,0 +1,56 @@
+{
+  "model": "qwen3-vl:8b-instruct",
+  "sample": "200 of csv, seed 0",
+  "n_cases": 200,
+  "n_scored": 200,
+  "n_failed": 0,
+  "mae_g": 32.7,
+  "median_ae_g": 28.5,
+  "within_10g_pct": 23.5,
+  "by_confidence": {
+    "high": {
+      "n": 24,
+      "mae_g": 23.0
+    },
+    "medium": {
+      "n": 165,
+      "mae_g": 32.5
+    },
+    "low": {
+      "n": 11,
+      "mae_g": 56.1
+    }
+  },
+  "worst": [
+    {
+      "id": "CGMacros-004-20230914T1954",
+      "true_g": 204.0,
+      "estimated_g": 12.0,
+      "confidence": "medium"
+    },
+    {
+      "id": "CGMacros-011-20201008T1750",
+      "true_g": 163.0,
+      "estimated_g": 24.0,
+      "confidence": "high"
+    },
+    {
+      "id": "CGMacros-001-20200502T1637",
+      "true_g": 9.0,
+      "estimated_g": 130.0,
+      "confidence": "medium"
+    },
+    {
+      "id": "CGMacros-033-20220417T1918",
+      "true_g": 92.0,
+      "estimated_g": 0.7,
+      "confidence": "medium"
+    },
+    {
+      "id": "CGMacros-008-20230208T1812",
+      "true_g": 117.0,
+      "estimated_g": 37.0,
+      "confidence": "medium"
+    }
+  ]
+}
